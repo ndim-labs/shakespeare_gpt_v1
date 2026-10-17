@@ -102,11 +102,27 @@ class ShakespeareGPT(nn.Module):
         return self.lm_head(self.ln_f(x)), None
 
     @torch.inference_mode()
-    def generate(self, idx: torch.Tensor, max_new_tokens: int) -> torch.Tensor:
+    def next_token_probabilities(
+        self, idx: torch.Tensor, temperature: float = 1.0, top_k: int | None = None
+    ) -> torch.Tensor:
+        """Probability of every vocabulary character coming next, after temperature and top-k."""
+        logits, _ = self(idx[:, -BLOCK_SIZE:])
+        logits = logits[:, -1, :] / temperature  # <1 sharpens, >1 flattens the distribution
+        if top_k is not None and top_k < logits.size(-1):
+            kth_best = torch.topk(logits, top_k).values[:, [-1]]
+            logits = logits.masked_fill(logits < kth_best, float("-inf"))  # keep only the k best
+        return F.softmax(logits, dim=-1)
+
+    @torch.inference_mode()
+    def generate(
+        self,
+        idx: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+    ) -> torch.Tensor:
         for _ in range(max_new_tokens):
-            idx_cond = idx[:, -BLOCK_SIZE:]
-            logits, _ = self(idx_cond)
-            probabilities = F.softmax(logits[:, -1, :], dim=-1)
+            probabilities = self.next_token_probabilities(idx, temperature, top_k)
             next_token = torch.multinomial(probabilities, num_samples=1)
             idx = torch.cat((idx, next_token), dim=1)
         return idx
@@ -159,8 +175,8 @@ def make_reply(
 st.set_page_config(page_title="Shakespeare GPT", page_icon="🎭")
 st.title("Shakespeare GPT")
 st.caption(
-    "Trained, tested, and built by nDimensions.Ai for educational purposes, "
-    "inspired by Andrej Karpathy's GPT tutorial."
+    "A 0.2M-parameter model with architecture inspired by Andrej Karpathy's "
+    "GPT video. Trained and built by the nDimensions.ai team. MIT License."
 )
 st.caption(
     "This tiny character-level model continues Shakespeare-style text; it is "

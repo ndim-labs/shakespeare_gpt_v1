@@ -4,8 +4,8 @@ A local Streamlit chat interface for the Tiny Shakespeare character-level GPT
 checkpoint in `shakespeare_gpt_v1.pth`. The app recreates the notebook's model
 architecture and character vocabulary so the checkpoint can be loaded directly.
 
-Trained, tested, and built by nDimensions.Ai for educational purposes, inspired
-by Andrej Karpathy's GPT tutorial.
+A 0.2M-parameter model with architecture inspired by Andrej Karpathy's GPT
+video. Trained and built by the nDimensions.ai team. MIT License.
 
 ## Run locally
 
