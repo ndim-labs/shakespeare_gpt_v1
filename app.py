@@ -1,3 +1,4 @@
+import html
 from pathlib import Path
 
 import streamlit as st
@@ -128,6 +129,9 @@ class ShakespeareGPT(nn.Module):
         return idx
 
 
+MODEL_PARAMETERS = sum(p.numel() for p in ShakespeareGPT().parameters())
+
+
 @st.cache_resource
 def load_model() -> ShakespeareGPT:
     if not CHECKPOINT_PATH.is_file():
@@ -161,16 +165,16 @@ def decode(tokens: list[int]) -> str:
 
 # The model learned plays formatted as "NAME:\nline of dialogue\n\n", so we format the chat the same way.
 SPEAKERS = {"user": "YOU", "assistant": "BARD"}
+TRACE_STEPS = 12  # how many generation steps to show in the replay
 
 
-def build_context(messages: list[dict[str, str]]) -> str:
-    """Turn the chat into play dialogue and keep only what fits in the model's context window."""
+def build_script(messages: list[dict[str, str]]) -> str:
+    """Turn the chat into play dialogue, ending with a cue for the BARD to speak."""
     script = "".join(
         f"{SPEAKERS[message['role']]}:\n{message['content']}\n\n" for message in messages
     )
-    script += f"{SPEAKERS['assistant']}:\n"  # cue the model to speak next, as the BARD
-    script = "".join(character for character in script if character in STOI)
-    return script[-BLOCK_SIZE:]
+    script += f"{SPEAKERS['assistant']}:\n"
+    return "".join(character for character in script if character in STOI)
 
 
 def make_reply(
@@ -179,19 +183,69 @@ def make_reply(
     max_new_tokens: int,
     temperature: float,
     top_k: int | None,
-) -> tuple[str, str, torch.Tensor]:
-    """Return (reply, exact context the model saw, probabilities for the first reply character)."""
-    context = build_context(messages)
-    context_tokens = torch.tensor([encode(context)], dtype=torch.long, device=DEVICE)
-    first_probabilities = model.next_token_probabilities(context_tokens, temperature, top_k)[0]
-    generated = model.generate(context_tokens, max_new_tokens, temperature, top_k)
-    reply = decode(generated[0, context_tokens.shape[1] :].tolist())
-    reply = reply.split("\n\n")[0]  # a blank line ends the speech; drop the next speaker's lines
-    return reply.strip(), context, first_probabilities.cpu()
+    seed: int | None,
+) -> tuple[str, dict]:
+    """Generate a reply one character at a time, recording what happened for the explainer panel."""
+    if seed is not None:
+        torch.manual_seed(seed)
+    script = build_script(messages)
+    context = script[-BLOCK_SIZE:]  # the model can only see this much
+    idx = torch.tensor([encode(context)], dtype=torch.long, device=DEVICE)
+    first_probabilities, trace = None, []
+    for step in range(max_new_tokens):
+        probabilities = model.next_token_probabilities(idx, temperature, top_k)
+        next_token = torch.multinomial(probabilities, num_samples=1)
+        if step == 0:
+            first_probabilities = probabilities[0].cpu()
+        if step < TRACE_STEPS:
+            top = torch.topk(probabilities[0], 3)
+            trace.append({
+                "window": decode(idx[0, -BLOCK_SIZE:].tolist()),
+                "top": [(ITOS[i], p) for p, i in zip(top.values.tolist(), top.indices.tolist())],
+                "picked": ITOS[next_token.item()],
+                "picked_p": probabilities[0, next_token.item()].item(),
+            })
+        idx = torch.cat((idx, next_token), dim=1)
+    reply = decode(idx[0, len(context):].tolist())
+    reply = reply.split("\n\n")[0].strip()  # a blank line ends the speech
+    internals = {"script": script, "context": context, "probabilities": first_probabilities, "trace": trace}
+    return reply, internals
 
 
 def show_char(character: str) -> str:
-    return {"\n": "⏎ (newline)", " ": "␣ (space)"}.get(character, character)
+    return {"\n": "⏎ newline", " ": "␣ space"}.get(character, character)
+
+
+def visible(text: str) -> str:
+    return "".join({"\n": "⏎", " ": "␣"}.get(character, character) for character in text)
+
+
+def script_html(script: str, context: str) -> str:
+    """The whole conversation: greyed where the model is blind, highlighted where it can see."""
+    hidden = script[: len(script) - len(context)]
+
+    def render(text: str) -> str:
+        return html.escape(text).replace("\n", "⏎<br>")
+
+    return (
+        "<div style='font-family:monospace;font-size:0.9rem;line-height:1.6;padding:10px;"
+        "border:1px solid rgba(128,128,128,0.3);border-radius:8px'>"
+        f"<span style='opacity:0.35'>{render(hidden)}</span>"
+        f"<span style='background:rgba(255,200,0,0.35);border-radius:3px'>{render(context)}</span>"
+        "</div>"
+    )
+
+
+def tiles_html(context: str) -> str:
+    """One tile per character, with the number the model actually receives."""
+    tiles = "".join(
+        "<div style='display:inline-flex;flex-direction:column;align-items:center;min-width:30px;"
+        "margin:2px;padding:4px 2px;border:1px solid rgba(128,128,128,0.4);border-radius:6px'>"
+        f"<span style='font-family:monospace;font-size:1.05rem'>{html.escape(visible(c))}</span>"
+        f"<span style='font-size:0.7rem;opacity:0.7'>{STOI[c]}</span></div>"
+        for c in context
+    )
+    return f"<div style='display:flex;flex-wrap:wrap'>{tiles}</div>"
 
 
 st.set_page_config(page_title="Shakespeare GPT", page_icon="🎭")
@@ -230,8 +284,27 @@ with st.sidebar:
         help="Only sample from the k most likely next characters.",
     )
     top_k = top_k_choice or None
-    show_internals = st.toggle("Show what the model sees", value=True)
-    st.caption(f"Running on {DEVICE}.")
+    seed_choice = st.number_input(
+        "Seed (0 = random)", min_value=0, value=0, step=1,
+        help="Use the same seed to get the same reply every time: handy for live demos.",
+    )
+    seed = int(seed_choice) or None
+    show_internals = st.toggle("Explain how the reply was made", value=True)
+
+    st.subheader("Model card")
+    st.markdown(
+        f"""
+| | |
+|---|---|
+| Parameters | {MODEL_PARAMETERS:,} |
+| Layers × heads | {N_LAYER} × {N_HEAD} |
+| Vector size | {N_EMBD} |
+| Context window | **{BLOCK_SIZE} characters** |
+| Vocabulary | {len(VOCAB)} characters |
+| Trained on | Tiny Shakespeare (~1M characters) |
+"""
+    )
+    st.caption(f"Running on {DEVICE}. For scale: GPT-3 has 175 billion parameters.")
     if st.button("Clear conversation"):
         st.session_state.messages = []
         st.session_state.pop("internals", None)
@@ -265,30 +338,70 @@ if prompt:
 
     with st.chat_message("assistant"):
         with st.spinner("Generating a continuation..."):
-            reply, context, probabilities = make_reply(
-                model, st.session_state.messages, response_length, temperature, top_k
+            reply, internals = make_reply(
+                model, st.session_state.messages, response_length, temperature, top_k, seed
             )
         st.markdown(reply or "_The model returned an empty continuation._")
     st.session_state.messages.append({"role": "assistant", "content": reply})
-    st.session_state.internals = (context, probabilities)
+    st.session_state.internals = internals
 
 if show_internals and "internals" in st.session_state:
-    context, probabilities = st.session_state.internals
-    with st.expander("🔍 What the model saw, and what it considered next", expanded=True):
-        st.markdown(f"**Context window: the last {BLOCK_SIZE} characters**, exactly as fed to the model:")
-        st.code(context.replace("\n", "⏎\n"), language=None)
-        st.caption(
-            "Everything earlier in the chat is invisible to the model. The chat is formatted "
-            "as a play (`YOU:` / `BARD:`) because that's what it learned from."
+    info = st.session_state.internals
+    st.divider()
+    st.subheader("🔍 How the model made that reply")
+    step1, step2, step3, step4 = st.tabs(
+        ["① What it can see", "② Text → numbers", "③ Next-character guess", "④ One character at a time"]
+    )
+
+    with step1:
+        st.markdown(
+            "The chat is rewritten as a **play script** (`YOU:` / `BARD:`), because the model learned from plays. "
+            f"But the model can only read the **last {BLOCK_SIZE} characters**, highlighted below. "
+            "Everything greyed out is **invisible** to it: it has no memory of the earlier conversation."
         )
-        top = torch.topk(probabilities, 10)
-        st.markdown("**Top 10 candidates for the first character of the reply** (after temperature and top-k):")
+        st.markdown(script_html(info["script"], info["context"]), unsafe_allow_html=True)
+        used = len(info["context"])
+        st.progress(used / BLOCK_SIZE, text=f"Context window: {used} / {BLOCK_SIZE} characters used")
+        st.caption("⏎ = new line. For scale, modern chat models read hundreds of thousands of tokens.")
+
+    with step2:
+        st.markdown(
+            "Neural networks only understand numbers. Each character becomes its **ID** in a "
+            f"{len(VOCAB)}-character vocabulary. These {len(info['context'])} numbers are *all* the model receives:"
+        )
+        st.markdown(tiles_html(info["context"]), unsafe_allow_html=True)
+        st.caption("Real models use bigger pieces (tokens): GPT-4's vocabulary has about 100,000.")
+
+    with step3:
+        st.markdown(
+            f"The model scores all **{len(VOCAB)} possible next characters**, and softmax turns the scores into "
+            "probabilities. These are the 10 most likely candidates for the **first** character of the reply:"
+        )
+        top = torch.topk(info["probabilities"], 10)
         st.bar_chart(
             [{"character": show_char(ITOS[i]), "probability": p}
              for p, i in zip(top.values.tolist(), top.indices.tolist())],
-            x="character",
-            y="probability",
-            horizontal=True,
-            sort="-probability",  # most likely first
+            x="character", y="probability", horizontal=True, sort="-probability",
         )
-        st.caption("The model samples one character from this distribution, appends it, and repeats.")
+        st.caption("Change the temperature and send again: low makes the top bar dominate; high flattens the bars.")
+
+    with step4:
+        st.markdown(
+            "The reply is written **one character at a time**: guess, pick one at random (weighted by probability), "
+            "append it, slide the window, repeat. These are the first steps:"
+        )
+        rows = [
+            {
+                "step": n,
+                "model sees (end of window)": visible(t["window"][-12:]),
+                "top 3 guesses": "  ·  ".join(f"{visible(c)} {p:.0%}" for c, p in t["top"]),
+                "picked": visible(t["picked"]),
+                "chance": f"{t['picked_p']:.0%}",
+                "note": "" if t["picked"] == t["top"][0][0] else "🎲 not the top guess",
+            }
+            for n, t in enumerate(info["trace"], start=1)
+        ]
+        st.dataframe(rows, hide_index=True, width="stretch")
+        st.caption(
+            "The 🎲 rows are why the same prompt gives different replies. Set a seed in the sidebar to make it repeatable."
+        )

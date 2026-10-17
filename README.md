@@ -33,12 +33,19 @@ limited to the model's 65-character training vocabulary.
 
 ## What the app shows
 
-| Feature | What it teaches |
-|---|---|
-| **Temperature** slider | Below 1 the model plays it safe and repeats itself; above 1 it gets creative, then chaotic |
-| **Top-k** slider | Sample only from the k most likely next characters |
-| **What the model sees** panel | The exact 32 characters fed to the model. Everything earlier in the chat is invisible to it |
-| **Next-character chart** | The top 10 candidates for the reply's first character: the softmax output the model samples from |
-| **Play-style prompt** | The chat is formatted as `YOU:` / `BARD:` dialogue, like the `ROMEO:` lines the model was trained on, and each reply stops at the end of the speech |
+**Sidebar:** temperature, top-k, response length, a **seed** for repeatable demos, and a **model card**.
+
+**"How the model made that reply":** four tabs, one concept each:
+
+| Tab | What you see | Concept |
+|---|---|---|
+| ① What it can see | The whole chat as a play script; only the last 32 characters are highlighted, the rest is greyed out | Context window |
+| ② Text → numbers | One tile per character with its ID: all the model receives | Tokenization |
+| ③ Next-character guess | Top 10 candidates for the reply's first character | Logits → softmax, temperature |
+| ④ One character at a time | Replay of the first 12 steps: top 3 guesses, which one was picked, and 🎲 when it wasn't the favourite | Sampling, autoregression |
+
+The chat is formatted as `YOU:` / `BARD:` dialogue, like the `ROMEO:` lines the model was trained on, and each reply stops at the end of the speech.
+
+**Presenting it?** See **[DEMO.md](DEMO.md)**: a 10-minute opening-demo script (what to click, what to say), common audience questions, and the build-along plan.
 
 Built for *Decoding Language Models* (nDimensions.AI), Phase 1 · session 1.0: [ndim-labs/p1-gpt-from-scratch](https://github.com/ndim-labs/p1-gpt-from-scratch/tree/main/1.0-preparation).
