@@ -159,17 +159,39 @@ def decode(tokens: list[int]) -> str:
     return "".join(ITOS[token] for token in tokens)
 
 
-def make_reply(
-    model: ShakespeareGPT, messages: list[dict[str, str]], max_new_tokens: int
-) -> str:
-    prompt = "\n".join(
-        f"{message['role']}: {message['content']}" for message in messages
+# The model learned plays formatted as "NAME:\nline of dialogue\n\n", so we format the chat the same way.
+SPEAKERS = {"user": "YOU", "assistant": "BARD"}
+
+
+def build_context(messages: list[dict[str, str]]) -> str:
+    """Turn the chat into play dialogue and keep only what fits in the model's context window."""
+    script = "".join(
+        f"{SPEAKERS[message['role']]}:\n{message['content']}\n\n" for message in messages
     )
-    prompt = "".join(character for character in prompt if character in STOI)
-    prompt = prompt[-BLOCK_SIZE:] or "\n"
-    prompt_tokens = torch.tensor([encode(prompt)], dtype=torch.long, device=DEVICE)
-    generated = model.generate(prompt_tokens, max_new_tokens)
-    return decode(generated[0, prompt_tokens.shape[1] :].tolist()).strip()
+    script += f"{SPEAKERS['assistant']}:\n"  # cue the model to speak next, as the BARD
+    script = "".join(character for character in script if character in STOI)
+    return script[-BLOCK_SIZE:]
+
+
+def make_reply(
+    model: ShakespeareGPT,
+    messages: list[dict[str, str]],
+    max_new_tokens: int,
+    temperature: float,
+    top_k: int | None,
+) -> tuple[str, str, torch.Tensor]:
+    """Return (reply, exact context the model saw, probabilities for the first reply character)."""
+    context = build_context(messages)
+    context_tokens = torch.tensor([encode(context)], dtype=torch.long, device=DEVICE)
+    first_probabilities = model.next_token_probabilities(context_tokens, temperature, top_k)[0]
+    generated = model.generate(context_tokens, max_new_tokens, temperature, top_k)
+    reply = decode(generated[0, context_tokens.shape[1] :].tolist())
+    reply = reply.split("\n\n")[0]  # a blank line ends the speech; drop the next speaker's lines
+    return reply.strip(), context, first_probabilities.cpu()
+
+
+def show_char(character: str) -> str:
+    return {"\n": "⏎ (newline)", " ": "␣ (space)"}.get(character, character)
 
 
 st.set_page_config(page_title="Shakespeare GPT", page_icon="🎭")
@@ -192,9 +214,27 @@ with st.sidebar:
         value=192,
         step=32,
     )
+    temperature = st.slider(
+        "Temperature",
+        min_value=0.1,
+        max_value=2.0,
+        value=1.0,
+        step=0.1,
+        help="Below 1: safer, more repetitive. Above 1: more creative, more chaotic.",
+    )
+    top_k_choice = st.slider(
+        "Top-k (0 = off)",
+        min_value=0,
+        max_value=len(VOCAB),
+        value=0,
+        help="Only sample from the k most likely next characters.",
+    )
+    top_k = top_k_choice or None
+    show_internals = st.toggle("Show what the model sees", value=True)
     st.caption(f"Running on {DEVICE}.")
     if st.button("Clear conversation"):
         st.session_state.messages = []
+        st.session_state.pop("internals", None)
         st.rerun()
 
 if "messages" not in st.session_state:
@@ -225,6 +265,30 @@ if prompt:
 
     with st.chat_message("assistant"):
         with st.spinner("Generating a continuation..."):
-            reply = make_reply(model, st.session_state.messages, response_length)
+            reply, context, probabilities = make_reply(
+                model, st.session_state.messages, response_length, temperature, top_k
+            )
         st.markdown(reply or "_The model returned an empty continuation._")
     st.session_state.messages.append({"role": "assistant", "content": reply})
+    st.session_state.internals = (context, probabilities)
+
+if show_internals and "internals" in st.session_state:
+    context, probabilities = st.session_state.internals
+    with st.expander("🔍 What the model saw, and what it considered next", expanded=True):
+        st.markdown(f"**Context window: the last {BLOCK_SIZE} characters**, exactly as fed to the model:")
+        st.code(context.replace("\n", "⏎\n"), language=None)
+        st.caption(
+            "Everything earlier in the chat is invisible to the model. The chat is formatted "
+            "as a play (`YOU:` / `BARD:`) because that's what it learned from."
+        )
+        top = torch.topk(probabilities, 10)
+        st.markdown("**Top 10 candidates for the first character of the reply** (after temperature and top-k):")
+        st.bar_chart(
+            [{"character": show_char(ITOS[i]), "probability": p}
+             for p, i in zip(top.values.tolist(), top.indices.tolist())],
+            x="character",
+            y="probability",
+            horizontal=True,
+            sort="-probability",  # most likely first
+        )
+        st.caption("The model samples one character from this distribution, appends it, and repeats.")

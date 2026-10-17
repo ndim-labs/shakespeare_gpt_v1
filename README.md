@@ -30,3 +30,15 @@ and otherwise runs on CPU.
 This small model was trained to continue Shakespeare-style text, not to follow
 chat instructions. Its context window is only 32 characters, and generation is
 limited to the model's 65-character training vocabulary.
+
+## What the app shows
+
+| Feature | What it teaches |
+|---|---|
+| **Temperature** slider | Below 1 the model plays it safe and repeats itself; above 1 it gets creative, then chaotic |
+| **Top-k** slider | Sample only from the k most likely next characters |
+| **What the model sees** panel | The exact 32 characters fed to the model. Everything earlier in the chat is invisible to it |
+| **Next-character chart** | The top 10 candidates for the reply's first character: the softmax output the model samples from |
+| **Play-style prompt** | The chat is formatted as `YOU:` / `BARD:` dialogue, like the `ROMEO:` lines the model was trained on, and each reply stops at the end of the speech |
+
+Built for *Decoding Language Models* (nDimensions.AI), Phase 1 · session 1.0: [ndim-labs/p1-gpt-from-scratch](https://github.com/ndim-labs/p1-gpt-from-scratch/tree/main/1.0-preparation).
